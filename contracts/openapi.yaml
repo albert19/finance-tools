@@ -1,0 +1,1178 @@
+openapi: 3.1.0
+info:
+  title: Finance API
+  version: 0.1.0
+  description: |
+    Contract for the currently implemented Symfony routes. The API paths are
+    /api/* (not /api/v1/*); URL versioning is a future possibility, not
+    implemented. /healthz and /readyz are unversioned operational probes.
+    IDs are owner-scoped; inaccessible resources generally return 404.
+    JSON request bodies must be objects with Content-Type: application/json.
+    Unknown JSON properties are currently ignored by the services.
+    Decimal database amounts are returned as strings; simulator calculations
+    and report aggregates are JSON numbers.
+tags:
+  - name: Auth
+  - name: Simulations
+  - name: Investments
+  - name: Categories
+  - name: Budgets
+  - name: Transactions
+  - name: Reports
+  - name: Probes
+security:
+  - bearerAuth: []
+paths:
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in and issue an access token and refresh cookie
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/RequestedWith'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, maxLength: 254, example: "user@example.test"}
+                password: {type: string, maxLength: 1024, format: password}
+            example: {email: "user@example.test", password: "example-password"}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+        '429': {$ref: '#/components/responses/TooManyAttempts'}
+  /api/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate refresh cookie and issue a new session
+      description: |
+        No JSON body or bearer token required. Uses refresh_token cookie; each
+        successful refresh consumes the old cookie and sets a replacement.
+        Reuse of a consumed token returns 401 and revokes its token family.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/RequestedWith'
+        - $ref: '#/components/parameters/RefreshCookie'
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke refresh token family and clear cookie
+      description: No bearer token required; logout is successful even without a known cookie.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/RequestedWith'
+        - $ref: '#/components/parameters/RefreshCookie'
+      responses:
+        '204':
+          description: No content; clears refresh_token cookie with matching attributes.
+          headers:
+            Set-Cookie:
+              schema: {type: string}
+              description: Expired refresh_token cookie.
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/me/password:
+    post:
+      tags: [Account]
+      summary: Change the current user password and revoke refresh sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: {type: string, maxLength: 1024, format: password}
+                newPassword: {type: string, minLength: 12, maxLength: 1024, format: password, pattern: '^\S+$', description: No whitespace}
+      responses:
+        '204': {description: Password changed and refresh cookie cleared}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/WrongCurrentPassword'}
+        '422': {$ref: '#/components/responses/Validation'}
+        '429': {$ref: '#/components/responses/TooManyAttempts'}
+  /api/me:
+    get:
+      tags: [Auth]
+      summary: Current user
+      responses:
+        '200': {$ref: '#/components/responses/User'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    patch:
+      tags: [Auth]
+      summary: Set current user's locale
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [locale]
+              properties:
+                locale: {type: string, enum: [en, es]}
+            example: {locale: es}
+      responses:
+        '200': {$ref: '#/components/responses/User'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/simulations:
+    post:
+      tags: [Simulations]
+      summary: Calculate a monthly investment projection
+      requestBody: {$ref: '#/components/requestBodies/Simulation'}
+      responses:
+        '200': {$ref: '#/components/responses/Projection'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/simulations/scenarios:
+    post:
+      tags: [Simulations]
+      summary: Project base and annual-rate ±2 percentage-point scenarios
+      description: Pessimistic and optimistic annual rates are clipped to -50 and 100.
+      requestBody: {$ref: '#/components/requestBodies/Simulation'}
+      responses:
+        '200':
+          description: Three complete projections.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pessimistic, base, optimistic]
+                properties:
+                  pessimistic: {$ref: '#/components/schemas/Projection'}
+                  base: {$ref: '#/components/schemas/Projection'}
+                  optimistic: {$ref: '#/components/schemas/Projection'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/investments:
+    get:
+      tags: [Investments]
+      summary: List owned investments (summary representation)
+      responses:
+        '200':
+          description: Ordered by start date and name.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/InvestmentSummary'}}
+              example: [{id: "019a0000-0000-7000-8000-000000000001", name: "Retirement", startDate: "2026-01-01", status: active, notes: ""}]
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Investments]
+      summary: Create investment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/NewInvestment'}
+            example:
+              name: Retirement
+              startDate: "2026-01-01"
+              notes: ""
+              parameters: {initialCapital: 10000, contribution: 200, annualRate: 5, horizonMonths: 120}
+      responses:
+        '201': {$ref: '#/components/responses/Investment'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/investments/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Investments]
+      summary: Investment, projection, and snapshots
+      responses:
+        '200': {$ref: '#/components/responses/Investment'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Investments]
+      summary: Update investment metadata (not parameters or start date)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, maxLength: 150}
+                notes: {type: string, maxLength: 2000}
+                status: {type: string, enum: [active, closed]}
+            example: {name: "Retirement plan", status: active}
+      responses:
+        '200': {$ref: '#/components/responses/Investment'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+    delete:
+      tags: [Investments]
+      summary: Delete investment and snapshots
+      responses:
+        '204': {description: No content}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/investments/{id}/snapshots:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Investments]
+      summary: Add dated actual-value snapshot
+      description: Date must not precede investment start or duplicate another snapshot date for this investment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/NewSnapshot'}
+            example: {date: "2026-06-01", marketValue: "11000.00", contribution: "200.00", withdrawal: "0.00", note: "June"}
+      responses:
+        '201':
+          description: Snapshot identifier only (not the full snapshot).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: {$ref: '#/components/schemas/Id'}
+              example: {id: "019a0000-0000-7000-8000-000000000002"}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/investments/{id}/snapshots/{snapshotId}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - name: snapshotId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Id'}
+    delete:
+      tags: [Investments]
+      summary: Delete owned investment snapshot
+      responses:
+        '204': {description: No content}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/investments/{id}/comparison:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Investments]
+      summary: Compare snapshots with the projected investment
+      responses:
+        '200':
+          description: Rates and deviationPct are fractions, not percentages.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Comparison'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/categories:
+    get:
+      tags: [Categories]
+      summary: List owned categories
+      parameters:
+        - name: includeArchived
+          in: query
+          description: Only the literal string "false" excludes archived categories; default includes them.
+          schema: {type: string, enum: ["true", "false"], default: "true"}
+      responses:
+        '200':
+          description: Ordered by kind and name.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/Category'}}
+              example: [{id: "019a0000-0000-7000-8000-000000000003", user_id: "019a0000-0000-7000-8000-000000000004", name: Food, normalized_name: food, kind: expense, archived: 0}]
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Categories]
+      summary: Create category
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/NewCategory'}
+            example: {name: Food, kind: expense}
+      responses:
+        '201': {$ref: '#/components/responses/Category'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/categories/defaults:
+    post:
+      tags: [Categories]
+      summary: Add missing standard income and expense categories
+      description: No request body required; repeated calls only report newly created IDs.
+      responses:
+        '201':
+          description: IDs created by this call.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [created]
+                properties:
+                  created: {type: array, items: {$ref: '#/components/schemas/Id'}}
+              example: {created: []}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/categories/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Categories]
+      summary: Rename or archive category
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, maxLength: 100}
+                archived: {type: boolean}
+            example: {archived: true}
+      responses:
+        '200': {$ref: '#/components/responses/Category'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+    delete:
+      tags: [Categories]
+      summary: Delete unused category
+      responses:
+        '204': {description: No content}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/budgets:
+    get:
+      tags: [Budgets]
+      summary: List owned budgets
+      parameters:
+        - name: year
+          in: query
+          schema: {type: integer, minimum: 1900, maximum: 9999}
+      responses:
+        '200':
+          description: Ordered by year and month; includes lines.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/Budget'}}
+              example: []
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/Validation'}
+    post:
+      tags: [Budgets]
+      summary: Create monthly budget, optionally copying another period's lines
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/NewBudget'}
+            example: {year: 2026, month: 6, notes: "June plan"}
+      responses:
+        '201': {$ref: '#/components/responses/Budget'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/budgets/{year}/{month}:
+    parameters:
+      - name: year
+        in: path
+        required: true
+        schema: {type: integer, minimum: 1900, maximum: 9999}
+      - name: month
+        in: path
+        required: true
+        schema: {type: integer, minimum: 1, maximum: 12}
+    get:
+      tags: [Budgets]
+      summary: Get budget by period
+      responses:
+        '200': {$ref: '#/components/responses/Budget'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/budgets/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Budgets]
+      summary: Update budget notes with optimistic version check
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: {type: integer, minimum: 1}
+                notes: {type: string, maxLength: 2000}
+            example: {version: 1, notes: "Revised plan"}
+      responses:
+        '200': {$ref: '#/components/responses/Budget'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+    delete:
+      tags: [Budgets]
+      summary: Delete budget and lines (no version required)
+      responses:
+        '204': {description: No content}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/budgets/{id}/lines:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Budgets]
+      summary: Add budget line, increment budget version
+      requestBody: {$ref: '#/components/requestBodies/BudgetLine'}
+      responses:
+        '201': {$ref: '#/components/responses/Budget'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/budgets/{id}/lines/{lineId}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - name: lineId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Id'}
+    put:
+      tags: [Budgets]
+      summary: Replace budget line, increment budget version
+      requestBody: {$ref: '#/components/requestBodies/BudgetLine'}
+      responses:
+        '200': {$ref: '#/components/responses/Budget'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+    delete:
+      tags: [Budgets]
+      summary: Delete budget line with version check
+      description: Unlike other DELETE operations this route requires an application/json object body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: {type: integer, minimum: 1}
+            example: {version: 2}
+      responses:
+        '204': {description: No content}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/transactions:
+    get:
+      tags: [Transactions]
+      summary: List transactions for a required period
+      parameters:
+        - name: year
+          in: query
+          required: true
+          schema: {type: integer, minimum: 1900, maximum: 9999}
+        - name: month
+          in: query
+          required: true
+          schema: {type: integer, minimum: 1, maximum: 12}
+        - name: kind
+          in: query
+          schema: {$ref: '#/components/schemas/Kind'}
+      responses:
+        '200':
+          description: Ordered by date then ID.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/TransactionListItem'}}
+              example: []
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/Validation'}
+    post:
+      tags: [Transactions]
+      summary: Create transaction
+      requestBody: {$ref: '#/components/requestBodies/Transaction'}
+      responses:
+        '201': {$ref: '#/components/responses/Transaction'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/transactions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Transactions]
+      summary: Replace transaction
+      requestBody: {$ref: '#/components/requestBodies/Transaction'}
+      responses:
+        '200': {$ref: '#/components/responses/Transaction'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/Validation'}
+    delete:
+      tags: [Transactions]
+      summary: Delete transaction
+      responses:
+        '204': {description: No content}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/reports/monthly/{year}/{month}:
+    parameters:
+      - name: year
+        in: path
+        required: true
+        schema: {type: integer, minimum: 1900, maximum: 9999}
+      - name: month
+        in: path
+        required: true
+        schema: {type: integer, minimum: 1, maximum: 12}
+    get:
+      tags: [Reports]
+      summary: Monthly planned vs actual report, including periods without a budget
+      responses:
+        '200':
+          description: Monthly variance report.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MonthlyReport'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /api/reports/annual/{year}:
+    parameters:
+      - name: year
+        in: path
+        required: true
+        schema: {type: integer, minimum: 1900, maximum: 9999}
+    get:
+      tags: [Reports]
+      summary: Annual report and twelve complete monthly reports
+      responses:
+        '200':
+          description: Annual variance report.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AnnualReport'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /healthz:
+    get:
+      tags: [Probes]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: Process is running.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, const: ok}
+              example: {status: ok}
+  /readyz:
+    get:
+      tags: [Probes]
+      summary: Database readiness probe
+      security: []
+      responses:
+        '200':
+          description: Database responds to SELECT 1.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, const: ready}
+              example: {status: ready}
+        '503':
+          description: Database unavailable (not a problem+json response).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, const: unavailable}
+              example: {status: unavailable}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: ES256 access token in Authorization header. Refresh/logout use the cookie instead.
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Id'}
+    Origin:
+      name: Origin
+      in: header
+      required: true
+      description: Must exactly match the request's scheme and host (including port).
+      schema: {type: string, format: uri}
+    RequestedWith:
+      name: X-Requested-With
+      in: header
+      required: true
+      schema: {type: string, const: XMLHttpRequest}
+    RefreshCookie:
+      name: refresh_token
+      in: cookie
+      required: false
+      description: Required in practice for refresh; optional for logout. Not exposed in JSON.
+      schema: {type: string}
+  requestBodies:
+    Simulation:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SimulationInput'}
+          example: {initialCapital: 10000, contribution: 200, annualRate: 5, horizonMonths: 120}
+    BudgetLine:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/BudgetLineInput'}
+          example: {version: 1, categoryId: "019a0000-0000-7000-8000-000000000003", amount: "250.00", notes: "Food"}
+    Transaction:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TransactionInput'}
+          example: {categoryId: "019a0000-0000-7000-8000-000000000003", date: "2026-06-01", amount: "25.50", description: "Groceries"}
+  responses:
+    Session:
+      description: Session; access token returned in JSON, refresh token only via cookie.
+      headers:
+        Set-Cookie:
+          description: refresh_token; Secure, HttpOnly, SameSite=Strict, Path=/api/auth, expiring after configured refresh TTL.
+          schema: {type: string}
+        Cache-Control:
+          schema: {type: string, example: no-store}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Session'}
+          example:
+            accessToken: "<access-jwt>"
+            expiresIn: 120
+            user: {id: "019a0000-0000-7000-8000-000000000004", email: "user@example.test", roles: ["ROLE_USER"], locale: en}
+    User:
+      description: Current user representation.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/User'}
+          example: {id: "019a0000-0000-7000-8000-000000000004", email: "user@example.test", roles: ["ROLE_USER"], locale: en}
+    Investment:
+      description: Full investment representation.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Investment'}
+          example:
+            id: "019a0000-0000-7000-8000-000000000001"
+            name: Retirement
+            start_date: "2026-01-01"
+            status: active
+            notes: ""
+            parameters: {initialCapital: 100, contribution: 0, annualRate: 0, horizonMonths: 1, contributionFrequency: monthly, compoundingFrequency: monthly, contributionTiming: end, inflation: 0, ter: 0, contributionIncrease: 0, withdrawalAmount: 0, withdrawalFrequency: monthly, withdrawalStartMonth: 0, applyTaxes: false}
+            projection:
+              parameters: {initialCapital: 100, contribution: 0, annualRate: 0, horizonMonths: 1, contributionFrequency: monthly, compoundingFrequency: monthly, contributionTiming: end, inflation: 0, ter: 0, contributionIncrease: 0, withdrawalAmount: 0, withdrawalFrequency: monthly, withdrawalStartMonth: 0, applyTaxes: false}
+              summary: {finalCapital: 100, finalCapitalNet: 100, totalContributed: 100, totalWithdrawn: 0, interestEarned: 0, totalFees: 0, totalTaxes: 0, finalTax: 0, realFinalCapital: 100, realFinalCapitalNet: 100, totalReturn: 0, totalReturnPct: 0, irrPct: 0, irrNetPct: 0, depletionMonth: null}
+              monthly: [{index: 1, opening: 100, contribution: 0, interest: 0, fees: 0, withdrawal: 0, taxes: 0, closing: 100, costBasis: 100, gains: 0, realClosing: 100}]
+              yearly: [{index: 1, opening: 100, contribution: 0, interest: 0, fees: 0, withdrawal: 0, taxes: 0, closing: 100, costBasis: 100, gains: 0, realClosing: 100}]
+            snapshots: []
+    Category:
+      description: Category database row.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Category'}
+          example: {id: "019a0000-0000-7000-8000-000000000003", user_id: "019a0000-0000-7000-8000-000000000004", name: Food, normalized_name: food, kind: expense, archived: 0}
+    Budget:
+      description: Budget database row with lines and current version.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Budget'}
+          example: {id: "019a0000-0000-7000-8000-000000000005", user_id: "019a0000-0000-7000-8000-000000000004", year: 2026, month: 6, notes: "June plan", version: 1, lines: []}
+    Transaction:
+      description: Transaction database row (snake_case fields, unlike list results).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Transaction'}
+          example: {id: "019a0000-0000-7000-8000-000000000006", user_id: "019a0000-0000-7000-8000-000000000004", category_id: "019a0000-0000-7000-8000-000000000003", date: "2026-06-01", amount: "25.50", description: Groceries}
+    Projection:
+      description: Calculated projection.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Projection'}
+          example:
+            parameters: {initialCapital: 100, contribution: 0, annualRate: 0, horizonMonths: 1, contributionFrequency: monthly, compoundingFrequency: monthly, contributionTiming: end, inflation: 0, ter: 0, contributionIncrease: 0, withdrawalAmount: 0, withdrawalFrequency: monthly, withdrawalStartMonth: 0, applyTaxes: false}
+            summary: {finalCapital: 100, finalCapitalNet: 100, totalContributed: 100, totalWithdrawn: 0, interestEarned: 0, totalFees: 0, totalTaxes: 0, finalTax: 0, realFinalCapital: 100, realFinalCapitalNet: 100, totalReturn: 0, totalReturnPct: 0, irrPct: 0, irrNetPct: 0, depletionMonth: null}
+            monthly: [{index: 1, opening: 100, contribution: 0, interest: 0, fees: 0, withdrawal: 0, taxes: 0, closing: 100, costBasis: 100, gains: 0, realClosing: 100}]
+            yearly: [{index: 1, opening: 100, contribution: 0, interest: 0, fees: 0, withdrawal: 0, taxes: 0, closing: 100, costBasis: 100, gains: 0, realClosing: 100}]
+    Unauthorized:
+      description: Missing/expired bearer token, bad credentials or invalid/reused refresh cookie.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+          examples:
+            bearer:
+              value: {type: "about:blank", title: "Bearer token required", status: 401, code: unauthorized, errors: []}
+            refresh:
+              value: {type: "about:blank", title: "Invalid refresh token", status: 401, code: invalid_refresh, errors: []}
+    Forbidden:
+      description: Missing or mismatched same-origin headers on auth cookie operations.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+          example: {type: "about:blank", title: "Origin and X-Requested-With required", status: 403, code: origin_denied, errors: []}
+    WrongCurrentPassword:
+      description: >-
+        The bearer token is valid but the current password is wrong. Deliberately
+        not 401, so clients do not refresh and retry the guess.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+          example: {type: "about:blank", title: "Current password is incorrect", status: 403, code: invalid_credentials, errors: []}
+    Conflict:
+      description: Duplicate resource, resource in use, or stale budget version.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+          examples:
+            version:
+              value: {type: "about:blank", title: "Budget was changed; reload and try again", status: 409, code: version_conflict, errors: []}
+            category:
+              value: {type: "about:blank", title: "Category is in use", status: 409, code: category_in_use, errors: []}
+    Validation:
+      description: Invalid input (including invalid period or duplicate snapshot date).
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+          example:
+            type: "about:blank"
+            title: Invalid input
+            status: 422
+            code: validation_error
+            errors: [{field: amount, code: invalid, params: [], message: "Expected a positive decimal amount (at most two decimal places)"}]
+    NotFound:
+      description: Not found or not owned by the authenticated user.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+          example: {type: "about:blank", title: "Not found", status: 404, code: not_found, errors: []}
+    UnsupportedMediaType:
+      description: JSON endpoint called without application/json Content-Type.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+          example: {type: "about:blank", title: "Expected application/json", status: 415, code: unsupported_media_type, errors: []}
+    TooManyAttempts:
+      description: >-
+        Attempt limit reached for the current 15-minute window. Login allows 30
+        attempts per client IP, 5 per email and client IP, and 100 per email;
+        password changes allow 5 per user.
+      headers:
+        Retry-After:
+          description: Seconds until the window ends (upper bound).
+          schema: {type: integer, example: 900}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+          example: {type: "about:blank", title: "Try again in 15 minutes", status: 429, code: too_many_attempts, errors: []}
+  schemas:
+    Id:
+      type: string
+      format: uuid
+    Date:
+      type: string
+      format: date
+    Kind:
+      type: string
+      enum: [income, expense]
+    Money:
+      description: Decimal database amount, two decimal places; positive for budget lines and transactions, nonnegative for snapshots.
+      type: string
+      pattern: '^\d+\.\d{2}$'
+      example: "250.00"
+    MoneyInput:
+      description: Accepted input is a decimal string or JSON number, up to 13 integral digits and two fractional digits.
+      oneOf:
+        - {type: string, pattern: '^\d{1,13}(\.\d{1,2})?$'}
+        - {type: number, minimum: 0}
+    NumericInput:
+      description: Numeric strings are also accepted; numeric bounds are applied after parsing.
+      oneOf:
+        - {type: number}
+        - {type: string, pattern: '^-?\d+(\.\d+)?$'}
+    User:
+      type: object
+      required: [id, email, roles, locale]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        email: {type: string, format: email}
+        roles: {type: array, items: {type: string}}
+        locale: {type: string, enum: [en, es]}
+    Session:
+      type: object
+      required: [accessToken, expiresIn, user]
+      properties:
+        accessToken: {type: string, description: Short-lived ES256 JWT}
+        expiresIn: {type: integer, description: Access-token lifetime in seconds}
+        user: {$ref: '#/components/schemas/User'}
+    Problem:
+      type: object
+      required: [type, title, status, code, errors]
+      properties:
+        type: {type: string, const: "about:blank"}
+        title: {type: string}
+        status: {type: integer}
+        code: {type: string}
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, code, params, message]
+            properties:
+              field: {type: string}
+              code: {type: string}
+              params: {type: array, items: {}, description: Currently always an empty array}
+              message: {type: string}
+    SimulationInput:
+      type: object
+      description: |
+        Numeric fields also accept numeric strings. At least one of initialCapital
+        and contribution must be nonzero. Optional fields have the defaults below.
+      required: [initialCapital, contribution, annualRate, horizonMonths]
+      properties:
+        initialCapital: {$ref: '#/components/schemas/NumericInput', description: "0 to 9999999999999"}
+        contribution: {$ref: '#/components/schemas/NumericInput', description: "0 to 9999999999999"}
+        annualRate: {$ref: '#/components/schemas/NumericInput', description: "-50 to 100"}
+        horizonMonths: {type: integer, minimum: 1, maximum: 1200}
+        contributionFrequency: {type: string, enum: [monthly, quarterly, semiannual, annual], default: monthly}
+        compoundingFrequency: {type: string, enum: [daily, monthly, quarterly, semiannual, annual], default: monthly}
+        contributionTiming: {type: string, enum: [beginning, end], default: end}
+        inflation: {$ref: '#/components/schemas/NumericInput', description: "0 to 50; default 0"}
+        ter: {$ref: '#/components/schemas/NumericInput', description: "0 to 10; default 0"}
+        contributionIncrease: {$ref: '#/components/schemas/NumericInput', description: "0 to 50; default 0"}
+        withdrawalAmount: {$ref: '#/components/schemas/NumericInput', description: "0 to 9999999999999; default 0"}
+        withdrawalFrequency: {type: string, enum: [monthly, quarterly, semiannual, annual], default: monthly}
+        withdrawalStartMonth: {type: integer, minimum: 0, default: 0}
+        applyTaxes: {type: boolean, default: false}
+    SimulationParameters:
+      description: Validated input with all optional defaults filled; numeric values normalized to numbers.
+      type: object
+      required: [initialCapital, contribution, annualRate, horizonMonths, contributionFrequency, compoundingFrequency, contributionTiming, inflation, ter, contributionIncrease, withdrawalAmount, withdrawalFrequency, withdrawalStartMonth, applyTaxes]
+      properties:
+        initialCapital: {type: number}
+        contribution: {type: number}
+        annualRate: {type: number}
+        horizonMonths: {type: integer}
+        contributionFrequency: {type: string, enum: [monthly, quarterly, semiannual, annual]}
+        compoundingFrequency: {type: string, enum: [daily, monthly, quarterly, semiannual, annual]}
+        contributionTiming: {type: string, enum: [beginning, end]}
+        inflation: {type: number}
+        ter: {type: number}
+        contributionIncrease: {type: number}
+        withdrawalAmount: {type: number}
+        withdrawalFrequency: {type: string, enum: [monthly, quarterly, semiannual, annual]}
+        withdrawalStartMonth: {type: integer}
+        applyTaxes: {type: boolean}
+    ProjectionRow:
+      type: object
+      required: [index, opening, contribution, interest, fees, withdrawal, taxes, closing, costBasis, gains, realClosing]
+      properties:
+        index: {type: integer}
+        opening: {type: number}
+        contribution: {type: number}
+        interest: {type: number}
+        fees: {type: number}
+        withdrawal: {type: number}
+        taxes: {type: number}
+        closing: {type: number}
+        costBasis: {type: number}
+        gains: {type: number}
+        realClosing: {type: number}
+    Projection:
+      type: object
+      required: [parameters, summary, monthly, yearly]
+      properties:
+        parameters: {$ref: '#/components/schemas/SimulationParameters'}
+        summary:
+          type: object
+          required: [finalCapital, finalCapitalNet, totalContributed, totalWithdrawn, interestEarned, totalFees, totalTaxes, finalTax, realFinalCapital, realFinalCapitalNet, totalReturn, totalReturnPct, irrPct, irrNetPct, depletionMonth]
+          properties:
+            finalCapital: {type: number}
+            finalCapitalNet: {type: number}
+            totalContributed: {type: number}
+            totalWithdrawn: {type: number}
+            interestEarned: {type: number}
+            totalFees: {type: number}
+            totalTaxes: {type: number}
+            finalTax: {type: number}
+            realFinalCapital: {type: number}
+            realFinalCapitalNet: {type: number}
+            totalReturn: {type: number, description: Fraction}
+            totalReturnPct: {type: number, description: Percentage points}
+            irrPct: {type: [number, "null"]}
+            irrNetPct: {type: [number, "null"]}
+            depletionMonth: {type: [integer, "null"]}
+        monthly: {type: array, items: {$ref: '#/components/schemas/ProjectionRow'}}
+        yearly: {type: array, items: {$ref: '#/components/schemas/ProjectionRow'}}
+    NewInvestment:
+      type: object
+      required: [name, startDate, parameters]
+      properties:
+        name: {type: string, maxLength: 150}
+        startDate: {$ref: '#/components/schemas/Date'}
+        notes: {type: string, maxLength: 2000, default: ""}
+        parameters: {$ref: '#/components/schemas/SimulationInput'}
+    InvestmentSummary:
+      type: object
+      required: [id, name, startDate, status, notes]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        name: {type: string}
+        startDate: {$ref: '#/components/schemas/Date'}
+        status: {type: string, enum: [active, closed]}
+        notes: {type: string}
+    Investment:
+      type: object
+      description: Detail uses start_date (unlike list's startDate).
+      required: [id, name, start_date, status, notes, parameters, projection, snapshots]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        name: {type: string}
+        start_date: {$ref: '#/components/schemas/Date'}
+        status: {type: string, enum: [active, closed]}
+        notes: {type: string}
+        parameters: {$ref: '#/components/schemas/SimulationParameters'}
+        projection: {$ref: '#/components/schemas/Projection'}
+        snapshots: {type: array, items: {$ref: '#/components/schemas/Snapshot'}}
+    NewSnapshot:
+      type: object
+      required: [date, marketValue]
+      properties:
+        date: {$ref: '#/components/schemas/Date'}
+        marketValue: {$ref: '#/components/schemas/MoneyInput'}
+        contribution: {$ref: '#/components/schemas/MoneyInput'}
+        withdrawal: {$ref: '#/components/schemas/MoneyInput'}
+        note: {type: string, maxLength: 255, default: ""}
+    Snapshot:
+      type: object
+      required: [id, date, marketValue, contribution, withdrawal, note]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        date: {$ref: '#/components/schemas/Date'}
+        marketValue: {$ref: '#/components/schemas/Money'}
+        contribution: {$ref: '#/components/schemas/Money'}
+        withdrawal: {$ref: '#/components/schemas/Money'}
+        note: {type: string}
+    Comparison:
+      type: object
+      required: [projection, points, expectedRate, actualXirr, status]
+      properties:
+        projection: {$ref: '#/components/schemas/Projection'}
+        points:
+          type: array
+          items:
+            type: object
+            required: [date, monthsElapsed, projected, actual, contributedActual, deviation, deviationPct]
+            properties:
+              date: {$ref: '#/components/schemas/Date'}
+              monthsElapsed: {type: number}
+              projected: {type: number}
+              actual: {type: number}
+              contributedActual: {type: number}
+              deviation: {type: number}
+              deviationPct: {type: [number, "null"], description: "Fraction, null if projected is zero"}
+        expectedRate: {type: number, description: Fraction}
+        actualXirr: {type: [number, "null"], description: Fraction; null without sufficient dated flows}
+        status: {type: string, enum: [No data yet, Ahead of plan, Behind plan, On track]}
+      example:
+        projection:
+          parameters: {initialCapital: 100, contribution: 0, annualRate: 0, horizonMonths: 1, contributionFrequency: monthly, compoundingFrequency: monthly, contributionTiming: end, inflation: 0, ter: 0, contributionIncrease: 0, withdrawalAmount: 0, withdrawalFrequency: monthly, withdrawalStartMonth: 0, applyTaxes: false}
+          summary: {finalCapital: 100, finalCapitalNet: 100, totalContributed: 100, totalWithdrawn: 0, interestEarned: 0, totalFees: 0, totalTaxes: 0, finalTax: 0, realFinalCapital: 100, realFinalCapitalNet: 100, totalReturn: 0, totalReturnPct: 0, irrPct: 0, irrNetPct: 0, depletionMonth: null}
+          monthly: [{index: 1, opening: 100, contribution: 0, interest: 0, fees: 0, withdrawal: 0, taxes: 0, closing: 100, costBasis: 100, gains: 0, realClosing: 100}]
+          yearly: [{index: 1, opening: 100, contribution: 0, interest: 0, fees: 0, withdrawal: 0, taxes: 0, closing: 100, costBasis: 100, gains: 0, realClosing: 100}]
+        points: []
+        expectedRate: 0
+        actualXirr: null
+        status: No data yet
+    NewCategory:
+      type: object
+      required: [name, kind]
+      properties:
+        name: {type: string, maxLength: 100}
+        kind: {$ref: '#/components/schemas/Kind'}
+    Category:
+      type: object
+      description: DBAL returns archived as a database integer flag (0 or 1).
+      required: [id, user_id, name, normalized_name, kind, archived]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        user_id: {$ref: '#/components/schemas/Id'}
+        name: {type: string}
+        normalized_name: {type: string}
+        kind: {$ref: '#/components/schemas/Kind'}
+        archived: {type: integer, enum: [0, 1]}
+    NewBudget:
+      type: object
+      required: [year, month]
+      properties:
+        year: {type: integer, minimum: 1900, maximum: 9999}
+        month: {type: integer, minimum: 1, maximum: 12}
+        notes: {type: string, maxLength: 2000, default: ""}
+        copyFrom:
+          type: object
+          required: [year, month]
+          properties:
+            year: {type: integer, minimum: 1900, maximum: 9999}
+            month: {type: integer, minimum: 1, maximum: 12}
+    BudgetLineInput:
+      type: object
+      required: [version, categoryId, amount]
+      properties:
+        version: {type: integer, minimum: 1, description: Current budget version}
+        categoryId: {$ref: '#/components/schemas/Id'}
+        amount: {$ref: '#/components/schemas/MoneyInput'}
+        notes: {type: string, maxLength: 255, default: ""}
+    BudgetLine:
+      type: object
+      required: [id, categoryId, categoryName, kind, amount, notes]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        categoryId: {$ref: '#/components/schemas/Id'}
+        categoryName: {type: string}
+        kind: {$ref: '#/components/schemas/Kind'}
+        amount: {$ref: '#/components/schemas/Money'}
+        notes: {type: string}
+    Budget:
+      type: object
+      required: [id, user_id, year, month, notes, version, lines]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        user_id: {$ref: '#/components/schemas/Id'}
+        year: {type: integer}
+        month: {type: integer}
+        notes: {type: string}
+        version: {type: integer}
+        lines: {type: array, items: {$ref: '#/components/schemas/BudgetLine'}}
+    TransactionInput:
+      type: object
+      required: [categoryId, date, amount]
+      properties:
+        categoryId: {$ref: '#/components/schemas/Id'}
+        date: {$ref: '#/components/schemas/Date'}
+        amount: {$ref: '#/components/schemas/MoneyInput'}
+        description: {type: string, maxLength: 255, default: ""}
+    Transaction:
+      type: object
+      required: [id, user_id, category_id, date, amount, description]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        user_id: {$ref: '#/components/schemas/Id'}
+        category_id: {$ref: '#/components/schemas/Id'}
+        date: {$ref: '#/components/schemas/Date'}
+        amount: {$ref: '#/components/schemas/Money'}
+        description: {type: string}
+    TransactionListItem:
+      type: object
+      required: [id, categoryId, categoryName, kind, date, amount, description]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        categoryId: {$ref: '#/components/schemas/Id'}
+        categoryName: {type: string}
+        kind: {$ref: '#/components/schemas/Kind'}
+        date: {$ref: '#/components/schemas/Date'}
+        amount: {$ref: '#/components/schemas/Money'}
+        description: {type: string}
+    ReportRow:
+      type: object
+      required: [categoryId, name, kind, planned, actual, variance, variancePct, status]
+      properties:
+        categoryId: {$ref: '#/components/schemas/Id'}
+        name: {type: string}
+        kind: {$ref: '#/components/schemas/Kind'}
+        planned: {type: number}
+        actual: {type: number}
+        variance: {type: number, description: Actual minus planned}
+        variancePct: {type: [number, "null"], description: Fraction; null when planned is zero}
+        status: {type: string, enum: [on_budget, favourable, unfavourable]}
+    ReportTotals:
+      type: object
+      required: [plannedIncome, actualIncome, plannedExpense, actualExpense, plannedNet, actualNet]
+      properties:
+        plannedIncome: {type: number}
+        actualIncome: {type: number}
+        plannedExpense: {type: number}
+        actualExpense: {type: number}
+        plannedNet: {type: number}
+        actualNet: {type: number}
+    MonthlyReport:
+      type: object
+      required: [year, month, budget, rows, totals]
+      properties:
+        year: {type: integer}
+        month: {type: integer}
+        budget:
+          oneOf:
+            - $ref: '#/components/schemas/Budget'
+            - {type: "null"}
+        rows: {type: array, items: {$ref: '#/components/schemas/ReportRow'}}
+        totals: {$ref: '#/components/schemas/ReportTotals'}
+      example:
+        year: 2026
+        month: 6
+        budget: null
+        rows: []
+        totals: {plannedIncome: 0, actualIncome: 0, plannedExpense: 0, actualExpense: 0, plannedNet: 0, actualNet: 0}
+    AnnualReport:
+      type: object
+      required: [year, rows, months, totals]
+      properties:
+        year: {type: integer}
+        rows: {type: array, items: {$ref: '#/components/schemas/ReportRow'}}
+        months: {type: array, minItems: 12, maxItems: 12, items: {$ref: '#/components/schemas/MonthlyReport'}}
+        totals: {$ref: '#/components/schemas/ReportTotals'}

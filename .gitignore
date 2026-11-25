@@ -1,14 +1,14 @@
-__pycache__/
-*.py[cod]
-.venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-dist/
-build/
-*.egg-info/
 .env
-config.toml
 credentials*.json
 service-account*.json
 *-sa.json
+
+# Container runtime credentials and generated assets
+secrets/
+api/.env*
+!api/.env.example
+api/vendor/
+webapp/node_modules/
+webapp/dist/
+webapp/playwright-report/
+webapp/test-results/

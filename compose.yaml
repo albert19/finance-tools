@@ -1,0 +1,283 @@
+# Production-like topology. Local MySQL and ELK are opt-in profiles; external
+# MySQL only requires DATABASE_URL (and no localdb profile).
+name: finance
+
+x-api-env: &api-env
+  APP_ENV: ${APP_ENV:-prod}
+  APP_SECRET_FILE: /run/secrets/app_secret
+  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in a private .env file}
+  JWT_SECRET_KEY: /run/secrets/jwt_private_key
+  JWT_PUBLIC_KEY: /run/secrets/jwt_public_key
+  JWT_TTL: ${JWT_TTL:-120}
+  REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-2592000}
+  CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
+  LOCAL_PREVIEW_ORIGIN: ${LOCAL_PREVIEW_ORIGIN:-}
+  # The webapp nginx on the private Docker network overwrites X-Forwarded-For.
+  # In production list the exact ingress CIDR instead of private_ranges.
+  TRUSTED_PROXIES: ${TRUSTED_PROXIES:-private_ranges}
+  TRUSTED_HOSTS: ${TRUSTED_HOSTS:-}
+  BUDGET_TOLERANCE_PCT: ${BUDGET_TOLERANCE_PCT:-2.0}
+  PORTFOLIO_TOLERANCE_PCT: ${PORTFOLIO_TOLERANCE_PCT:-2.0}
+  SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
+  SEED_ADMIN_PASSWORD_FILE: /run/secrets/seed_admin_password
+
+x-api-secrets: &api-secrets
+  - app_secret
+  - jwt_private_key
+  - jwt_public_key
+  - seed_admin_password
+
+services:
+  webapp:
+    build:
+      context: ./webapp
+    image: finance-webapp:local
+    environment:
+      API_BASE_URL: ${API_BASE_URL:-/api}
+      API_UPSTREAM: api:8000
+    ports:
+      - "${WEBAPP_BIND:-0.0.0.0}:${WEBAPP_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [app]
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./api
+      args:
+        APP_UID: ${APP_UID:-1000}
+    image: finance-api:local
+    environment: *api-env
+    secrets: *api-secrets
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8000/readyz') === false ? 1 : 0);"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [app]
+    restart: unless-stopped
+
+  # The migration/seed command is also suitable for a pre-deploy Kubernetes Job.
+  # Retries only the DB connection, never a failed migration.
+  migrate:
+    build:
+      context: ./api
+      args:
+        APP_UID: ${APP_UID:-1000}
+    image: finance-api:local
+    depends_on:
+      dbapp:
+        condition: service_healthy
+        required: false
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for attempt in $$(seq 1 40); do
+          if php -r '$$u=parse_url(getenv("DATABASE_URL")); new PDO("mysql:host=".($$u["host"] ?? "dbapp").";port=".($$u["port"] ?? 3306).";dbname=".ltrim($$u["path"] ?? "", "/"), rawurldecode($$u["user"] ?? ""), rawurldecode($$u["pass"] ?? ""));' >/dev/null 2>&1; then break; fi
+          if [ "$$attempt" -eq 40 ]; then echo "Database unavailable after 120 seconds" >&2; exit 1; fi
+          sleep 3
+        done
+        php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration
+        php bin/console app:seed
+        php bin/console app:auth:prune
+    environment: *api-env
+    secrets: *api-secrets
+    networks: [app]
+    restart: "no"
+
+  dbapp:
+    image: mysql:9.7.4
+    profiles: [localdb]
+    environment:
+      MYSQL_DATABASE: finance
+      MYSQL_USER: finance
+      MYSQL_PASSWORD_FILE: /run/secrets/mysql_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+    secrets: [mysql_password, mysql_root_password]
+    ports:
+      - "${MYSQL_BIND:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$(cat /run/secrets/mysql_root_password) mysql -h 127.0.0.1 -u root -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks: [app]
+    restart: unless-stopped
+
+  elasticsearch:
+    image: ${ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:9.5.6}
+    profiles: [observability]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false" # local Docker network only; use TLS in production
+      ELASTIC_PASSWORD_FILE: /run/secrets/elastic_password
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+    secrets: [elastic_password]
+    ports:
+      - "${ES_BIND:-127.0.0.1}:${ES_PORT:-9200}:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u \"elastic:$$(cat /run/secrets/elastic_password)\" http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 90s
+    networks: [observability, observability_ingress]
+    restart: unless-stopped
+
+  es-setup:
+    image: ${ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:9.5.6}
+    profiles: [observability]
+    entrypoint: ["/bin/bash", "/ops/elasticsearch/setup.sh"]
+    environment:
+      ES_URL: http://elasticsearch:9200
+    secrets: [elastic_password, kibana_password, logstash_password]
+    volumes:
+      - ./ops/elasticsearch/setup.sh:/ops/elasticsearch/setup.sh:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks: [observability]
+    restart: "no"
+
+  logstash:
+    image: ${LOGSTASH_IMAGE:-docker.elastic.co/logstash/logstash:9.5.6}
+    profiles: [observability]
+    entrypoint: ["/bin/bash", "/ops/logstash/entrypoint.sh"]
+    environment:
+      ES_URL: http://elasticsearch:9200
+      LOGSTASH_BEATS_PORT: "5044"
+      LOGSTASH_API_PORT: "9600"
+      LS_JAVA_OPTS: -Xms512m -Xmx512m
+    secrets: [logstash_password]
+    volumes:
+      - ./ops/logstash/entrypoint.sh:/ops/logstash/entrypoint.sh:ro
+      - ./ops/logstash/redact.rb:/ops/logstash/redact.rb:ro
+      - ./ops/logstash/pipeline:/usr/share/logstash/pipeline:ro
+    ports:
+      - "${LOGSTASH_BEATS_BIND:-127.0.0.1}:${LOGSTASH_BEATS_PORT:-5044}:5044"
+      - "${LOGSTASH_API_BIND:-127.0.0.1}:${LOGSTASH_API_PORT:-9600}:9600"
+    depends_on:
+      es-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9600/_node/pipelines >/dev/null"]
+      interval: 20s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+    networks: [observability, observability_ingress]
+    restart: unless-stopped
+
+  kibana:
+    image: ${KIBANA_IMAGE:-docker.elastic.co/kibana/kibana:9.5.6}
+    profiles: [observability]
+    entrypoint: ["/bin/bash", "/ops/kibana/entrypoint.sh"]
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      ELASTICSEARCH_USERNAME: kibana_system
+      SERVER_HOST: 0.0.0.0
+    secrets: [kibana_password]
+    volumes:
+      - ./ops/kibana/entrypoint.sh:/ops/kibana/entrypoint.sh:ro
+    ports:
+      - "${KIBANA_BIND:-127.0.0.1}:${KIBANA_PORT:-5601}:5601"
+    depends_on:
+      es-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5601/api/status >/dev/null"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 90s
+    networks: [observability, observability_ingress]
+    restart: unless-stopped
+
+  kibana-setup:
+    image: ${ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:9.5.6}
+    profiles: [observability]
+    entrypoint: ["/bin/bash", "/ops/kibana/setup.sh"]
+    secrets: [elastic_password]
+    volumes:
+      - ./ops/kibana/setup.sh:/ops/kibana/setup.sh:ro
+    depends_on:
+      kibana:
+        condition: service_healthy
+    networks: [observability]
+    restart: "no"
+
+  # Dev-only Docker socket access; on Kubernetes replace with a Filebeat DaemonSet.
+  filebeat:
+    image: ${FILEBEAT_IMAGE:-docker.elastic.co/beats/filebeat:9.5.6}
+    profiles: [observability]
+    user: root
+    command: ["filebeat", "-e", "--strict.perms=false", "-c", "/usr/share/filebeat/filebeat.yml"]
+    volumes:
+      - ./ops/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - filebeatdata:/usr/share/filebeat/data
+    depends_on:
+      logstash:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "filebeat", "test", "output", "-c", "/usr/share/filebeat/filebeat.yml", "--strict.perms=false"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks: [observability]
+    restart: unless-stopped
+
+networks:
+  app:
+  observability:
+    internal: true
+  # Docker cannot publish host ports from services on an internal-only network.
+  observability_ingress:
+
+volumes:
+  dbdata:
+  esdata:
+  filebeatdata:
+
+secrets:
+  app_secret:
+    file: ${APP_SECRET_FILE:-./secrets/app_secret}
+  mysql_password:
+    file: ${MYSQL_PASSWORD_FILE:-./secrets/mysql_password}
+  mysql_root_password:
+    file: ${MYSQL_ROOT_PASSWORD_FILE:-./secrets/mysql_root_password}
+  elastic_password:
+    file: ${ELASTIC_PASSWORD_FILE:-./secrets/elastic_password}
+  kibana_password:
+    file: ${KIBANA_PASSWORD_FILE:-./secrets/kibana_password}
+  logstash_password:
+    file: ${LOGSTASH_PASSWORD_FILE:-./secrets/logstash_password}
+  jwt_private_key:
+    file: ${JWT_PRIVATE_KEY_FILE:-./secrets/jwt-private.pem}
+  jwt_public_key:
+    file: ${JWT_PUBLIC_KEY_FILE:-./secrets/jwt-public.pem}
+  seed_admin_password:
+    file: ${SEED_ADMIN_PASSWORD_FILE:-./secrets/seed_admin_password}

@@ -1,0 +1,10 @@
+framework:
+  secret: '%env(file:APP_SECRET_FILE)%'
+  router:
+    utf8: true
+  handle_all_throwables: true
+  # Only X-Forwarded-For is trusted (client IP for throttling); scheme and host
+  # still come from the connection so the exact Origin check cannot be spoofed.
+  trusted_proxies: '%env(TRUSTED_PROXIES)%'
+  trusted_headers: ['x-forwarded-for']
+  trusted_hosts: '%env(TRUSTED_HOSTS)%'

@@ -1,0 +1,7 @@
+vendor
+var
+.env.local
+.env
+composer.phar
+.env*
+!.env.example

@@ -1,0 +1,46 @@
+server {
+    listen ${WEBAPP_PORT};
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+    server_tokens off;
+    client_max_body_size 1m;
+    access_log /dev/stdout finance_json;
+    error_log /dev/stderr warn;
+
+    # Locations that add their own headers (e.g. Cache-Control) still get these.
+    add_header_inherit merge;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
+    add_header Cross-Origin-Opener-Policy same-origin always;
+    add_header Cross-Origin-Resource-Policy same-origin always;
+    # Browsers ignore HSTS over plain HTTP; it takes effect behind a TLS ingress.
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+
+    location = /healthz { access_log off; default_type text/plain; return 200 'ok'; }
+    location = /config.js { add_header Cache-Control "no-store"; }
+    location /api/ {
+        # The API sets its own security headers; do not duplicate them.
+        add_header_inherit off;
+        proxy_hide_header X-Powered-By;
+        proxy_pass http://api:${API_PORT};
+        # Preserve the public port for the API's exact Origin check.
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # Overwrite (never append) so clients cannot spoof the IP used for throttling.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+    location / {
+        add_header Cache-Control "no-store";
+        try_files $uri $uri/ /index.html;
+    }
+}

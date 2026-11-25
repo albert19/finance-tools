@@ -1,0 +1,18 @@
+{
+    auto_https off
+    # No runtime config API; configuration is immutable in the image.
+    admin off
+}
+:8000 {
+    root * /app/public
+    request_body {
+        max_size 1MB
+    }
+    header {
+        -Server
+        -X-Powered-By
+        defer
+    }
+    encode zstd gzip
+    php_server
+}

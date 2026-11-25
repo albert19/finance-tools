@@ -1,0 +1,22 @@
+parameters:
+  env(TRUSTED_PROXIES): ''
+  env(TRUSTED_HOSTS): ''
+services:
+  _defaults:
+    autowire: true
+    autoconfigure: true
+  App\:
+    resource: '../src/'
+    exclude: '../src/{Entity,Kernel.php,Port}'
+  App\Port\BudgetRepository:
+    alias: App\Repository\DbalBudgetRepository
+  App\Port\ReportRepository:
+    alias: App\Repository\DbalReportRepository
+  App\Port\LedgerRepository:
+    alias: App\Repository\DbalLedgerRepository
+  App\Port\InvestmentRepository:
+    alias: App\Repository\DoctrineInvestmentRepository
+  App\Port\AuthRepository:
+    alias: App\Repository\DbalAuthRepository
+  App\Port\HealthRepository:
+    alias: App\Repository\DbalHealthRepository
